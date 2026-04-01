@@ -6,70 +6,167 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: 'Target repo name'
+        description: 'Target repo name (e.g., my-repo)'
         required: true
       file_path:
-        description: 'File path'
+        description: 'File path (e.g., src/config.json)'
         required: true
       content:
-        description: 'File content'
+        description: 'File content (base64 encoded for binary safety)'
         required: false
+        default: ''
       action:
-        description: 'upsert or delete'
+        description: 'Action to perform'
         required: true
+        type: choice
+        options:
+          - upsert
+          - delete
       id:
-        description: 'Record ID'
+        description: 'Supabase record ID to mark as done'
         required: false
+        default: ''
+
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Set variables
+      - name: Set up variables
+        id: vars
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "ACTION=${{ github.event.inputs.action }}" >> $GITHUB_ENV
-            echo "FILE_PATH=${{ github.event.inputs.file_path }}" >> $GITHUB_ENV
-            echo "CONTENT=${{ github.event.inputs.content }}" >> $GITHUB_ENV
-            echo "RECORD_ID=${{ github.event.inputs.id }}" >> $GITHUB_ENV
-            echo "TARGET_REPO=${{ github.event.inputs.repo }}" >> $GITHUB_ENV
+            ACTION="${{ github.event.inputs.action }}"
+            FILE_PATH="${{ github.event.inputs.file_path }}"
+            CONTENT="${{ github.event.inputs.content }}"
+            RECORD_ID="${{ github.event.inputs.id }}"
+            TARGET_REPO="${{ github.event.inputs.repo }}"
           else
-            echo "ACTION=${{ github.event.client_payload.action }}" >> $GITHUB_ENV
-            echo "FILE_PATH=${{ github.event.client_payload.file_path }}" >> $GITHUB_ENV
-            echo "CONTENT=${{ github.event.client_payload.content }}" >> $GITHUB_ENV
-            echo "RECORD_ID=${{ github.event.client_payload.id }}" >> $GITHUB_ENV
-            echo "TARGET_REPO=${{ github.event.client_payload.repo }}" >> $GITHUB_ENV
+            ACTION="${{ github.event.client_payload.action }}"
+            FILE_PATH="${{ github.event.client_payload.file_path }}"
+            CONTENT="${{ github.event.client_payload.content }}"
+            RECORD_ID="${{ github.event.client_payload.id }}"
+            TARGET_REPO="${{ github.event.client_payload.repo }}"
           fi
+          
+          # Export to GITHUB_ENV and GITHUB_OUTPUT
+          echo "ACTION=$ACTION" >> $GITHUB_ENV
+          echo "FILE_PATH=$FILE_PATH" >> $GITHUB_ENV
+          echo "CONTENT=$CONTENT" >> $GITHUB_ENV
+          echo "RECORD_ID=$RECORD_ID" >> $GITHUB_ENV
+          echo "TARGET_REPO=$TARGET_REPO" >> $GITHUB_ENV
+          
+          echo "action=$ACTION" >> $GITHUB_OUTPUT
+          echo "file_path=$FILE_PATH" >> $GITHUB_OUTPUT
+          echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
+          echo "target_repo=$TARGET_REPO" >> $GITHUB_OUTPUT
 
-      - name: Clone and push to target repo
+      - name: Clone target repository
+        id: clone
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          TARGET_REPO: ${{ env.TARGET_REPO }}
         run: |
-          git clone https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git target_repo
+          # Clone with full history to detect default branch
+          git clone --depth=1 "https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git" target_repo
           cd target_repo
-          git config user.email "claude-bot@github.com"
-          git config user.name "Claude Bot"
-          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git
+          
+          # Detect default branch (main or master)
+          DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "DEFAULT_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
+          echo "default_branch=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
+          echo "✅ Cloned $TARGET_REPO, default branch: $DEFAULT_BRANCH"
 
+      - name: Configure Git
+        working-directory: target_repo
+        run: |
+          git config user.email "claude-bot@astrux5.dev"
+          git config user.name "Claude Sync Bot"
+          git config --global init.defaultBranch ${{ env.DEFAULT_BRANCH }}
+
+      - name: Perform sync operation
+        id: sync
+        working-directory: target_repo
+        env:
+          ACTION: ${{ env.ACTION }}
+          FILE_PATH: ${{ env.FILE_PATH }}
+          CONTENT: ${{ env.CONTENT }}
+        run: |
           if [ "$ACTION" = "upsert" ]; then
+            echo "📝 Upserting $FILE_PATH..."
             mkdir -p "$(dirname "$FILE_PATH")"
-            printf '%s' "$CONTENT" > "$FILE_PATH"
+            
+            # Decode base64 content (handles special chars, newlines, binary)
+            if [ -n "$CONTENT" ]; then
+              echo "$CONTENT" | base64 -d > "$FILE_PATH" 2>/dev/null || echo "$CONTENT" > "$FILE_PATH"
+            else
+              touch "$FILE_PATH"
+            fi
+            
             git add "$FILE_PATH"
-            git diff --cached --quiet || git commit -m "Claude: upsert $FILE_PATH"
-            git push origin main
+            
+            if git diff --cached --quiet; then
+              echo "ℹ️ No changes to commit"
+              echo "changed=false" >> $GITHUB_OUTPUT
+            else
+              git commit -m "🤖 Claude: upsert $FILE_PATH [skip ci]"
+              echo "changed=true" >> $GITHUB_OUTPUT
+            fi
+            
           elif [ "$ACTION" = "delete" ]; then
-            git rm -f "$FILE_PATH"
-            git commit -m "Claude: delete $FILE_PATH"
-            git push origin main
+            echo "🗑️ Deleting $FILE_PATH..."
+            
+            if [ -f "$FILE_PATH" ]; then
+              git rm -f "$FILE_PATH"
+              git commit -m "🤖 Claude: delete $FILE_PATH [skip ci]"
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "⚠️ File $FILE_PATH does not exist"
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
           fi
 
-      - name: Mark done in Supabase
-        if: env.RECORD_ID != ''
+      - name: Push changes
+        if: steps.sync.outputs.changed == 'true'
+        working-directory: target_repo
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          TARGET_REPO: ${{ env.TARGET_REPO }}
+          DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
         run: |
-          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/github_sync?id=eq.$RECORD_ID" \
-            -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
+          git push "https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git" "$DEFAULT_BRANCH"
+          echo "✅ Pushed to $DEFAULT_BRANCH"
+
+      - name: Update Supabase status
+        if: env.RECORD_ID != '' && steps.sync.outputs.changed == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RECORD_ID: ${{ env.RECORD_ID }}
+        run: |
+          echo "📡 Marking record $RECORD_ID as done in Supabase..."
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH \
+            "${SUPABASE_URL}/rest/v1/github_sync?id=eq.${RECORD_ID}" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}" \
             -H "Content-Type: application/json" \
-            -d '{"status":"done"}'
+            -d '{"status":"done","completed_at":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+            echo "✅ Supabase updated successfully"
+          else
+            echo "❌ Supabase update failed (HTTP $HTTP_CODE): $BODY"
+            exit 1
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf target_repo
