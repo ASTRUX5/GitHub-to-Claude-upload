@@ -41,17 +41,15 @@ jobs:
             echo "TARGET_REPO=${{ github.event.client_payload.repo }}" >> $GITHUB_ENV
           fi
 
-      - name: Checkout target repo
-        uses: actions/checkout@v4
-        with:
-          repository: ASTRUX5/${{ env.TARGET_REPO }}
-          token: ${{ secrets.GH_PAT }}
+      - name: Clone target repo with PAT
+        run: |
+          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/ASTRUX5/${{ env.TARGET_REPO }}.git target_repo
 
       - name: Process sync action
         run: |
+          cd target_repo
           git config user.email "claude-bot@github.com"
           git config user.name "Claude Bot"
-          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/ASTRUX5/${{ env.TARGET_REPO }}.git
 
           if [ "$ACTION" = "upsert" ]; then
             mkdir -p "$(dirname "$FILE_PATH")"
