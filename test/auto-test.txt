@@ -1,1 +1,1 @@
-Auto triggered by Claude via Supabase!
+Auto triggered by Claude!
