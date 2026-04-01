@@ -1,0 +1,96 @@
+name: Supabase GitHub Sync
+
+on:
+  repository_dispatch:
+    types: [github_sync]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Target repo name'
+        required: true
+      file_path:
+        description: 'File path'
+        required: true
+      content:
+        description: 'File content'
+        required: false
+      action:
+        description: 'upsert or delete'
+        required: true
+      id:
+        description: 'Record ID'
+        required: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set variables
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ACTION=${{ github.event.inputs.action }}" >> $GITHUB_ENV
+            echo "FILE_PATH=${{ github.event.inputs.file_path }}" >> $GITHUB_ENV
+            echo "RECORD_ID=${{ github.event.inputs.id }}" >> $GITHUB_ENV
+            echo "TARGET_REPO=${{ github.event.inputs.repo }}" >> $GITHUB_ENV
+            printf '%s' "${{ github.event.inputs.content }}" > /tmp/file_content.txt
+          else
+            echo "ACTION=${{ github.event.client_payload.action }}" >> $GITHUB_ENV
+            echo "FILE_PATH=${{ github.event.client_payload.file_path }}" >> $GITHUB_ENV
+            echo "RECORD_ID=${{ github.event.client_payload.id }}" >> $GITHUB_ENV
+            echo "TARGET_REPO=${{ github.event.client_payload.repo }}" >> $GITHUB_ENV
+            printf '%s' "${{ github.event.client_payload.content }}" > /tmp/file_content.txt
+          fi
+
+      - name: Clone and push to target repo
+        id: push
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git clone https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git target_repo
+          cd target_repo
+          git config user.email "claude-bot@github.com"
+          git config user.name "Claude Bot"
+          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git
+          if [ "$ACTION" = "upsert" ]; then
+            mkdir -p "$(dirname "$FILE_PATH")"
+            cp /tmp/file_content.txt "$FILE_PATH"
+            git add "$FILE_PATH"
+            git diff --cached --quiet || git commit -m "Claude: upsert $FILE_PATH"
+            git push origin main
+          elif [ "$ACTION" = "delete" ]; then
+            git rm -f "$FILE_PATH"
+            git commit -m "Claude: delete $FILE_PATH"
+            git push origin main
+          fi
+
+      - name: Notify Telegram Success
+        if: success()
+        run: |
+          if [ "$ACTION" = "upsert" ]; then
+            TEXT="*GitHub Sync*%0A%E2%9C%85 *Uploaded Successfully*%0A%0A*File:* %60$FILE_PATH%60%0A*Repo:* %60$TARGET_REPO%60%0A*Status:* Success"
+          else
+            TEXT="*GitHub Sync*%0A%F0%9F%97%91 *Deleted Successfully*%0A%0A*File:* %60$FILE_PATH%60%0A*Repo:* %60$TARGET_REPO%60%0A*Status:* Success"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${TEXT}" \
+            -d "parse_mode=Markdown"
+
+      - name: Notify Telegram Failure
+        if: failure()
+        run: |
+          if [ "$ACTION" = "upsert" ]; then VERB="Upload"; else VERB="Delete"; fi
+          TEXT="*GitHub Sync*%0A%E2%9D%8C *${VERB} Failed*%0A%0A*File:* %60$FILE_PATH%60%0A*Repo:* %60$TARGET_REPO%60%0A*Status:* Failed"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${TEXT}" \
+            -d "parse_mode=Markdown"
+
+      - name: Mark done in Supabase
+        if: env.RECORD_ID != ''
+        run: |
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/github_sync?id=eq.$RECORD_ID" \
+            -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status":"done"}'
