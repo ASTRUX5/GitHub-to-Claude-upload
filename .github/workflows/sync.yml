@@ -41,9 +41,37 @@ jobs:
             echo "TARGET_REPO=${{ github.event.client_payload.repo }}" >> $GITHUB_ENV
           fi
 
-      - name: Clone target repo with PAT
+      - name: Diagnose - Check PAT and target
         run: |
-          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/ASTRUX5/${{ env.TARGET_REPO }}.git target_repo
+          echo "=== DIAGNOSTICS ==="
+          echo "TARGET_REPO: $TARGET_REPO"
+          echo "FILE_PATH: $FILE_PATH"
+          echo "ACTION: $ACTION"
+          PAT="${{ secrets.GH_PAT }}"
+          echo "PAT length: ${#PAT}"
+          echo "PAT starts with: ${PAT:0:4}"
+          echo "=== Testing GitHub API auth ==="
+          RESPONSE=$(curl -s -o /tmp/gh_response.txt -w "%{http_code}" \
+            -H "Authorization: Bearer $PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user)
+          echo "Auth check HTTP status: $RESPONSE"
+          cat /tmp/gh_response.txt
+          echo ""
+          echo "=== Testing repo access ==="
+          REPO_RESPONSE=$(curl -s -o /tmp/repo_response.txt -w "%{http_code}" \
+            -H "Authorization: Bearer $PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/ASTRUX5/$TARGET_REPO)
+          echo "Repo check HTTP status: $REPO_RESPONSE"
+          cat /tmp/repo_response.txt
+
+      - name: Clone target repo
+        run: |
+          PAT="${{ secrets.GH_PAT }}"
+          echo "Cloning https://x-access-token:[PAT]@github.com/ASTRUX5/$TARGET_REPO.git"
+          git clone https://x-access-token:$PAT@github.com/ASTRUX5/$TARGET_REPO.git target_repo
+          echo "Clone exit code: $?"
 
       - name: Process sync action
         run: |
@@ -56,11 +84,13 @@ jobs:
             printf '%s' "$CONTENT" > "$FILE_PATH"
             git add "$FILE_PATH"
             git diff --cached --quiet || git commit -m "Claude: upsert $FILE_PATH"
-            git push
+            echo "=== Pushing to origin ==="
+            git push 2>&1
+            echo "Push exit code: $?"
           elif [ "$ACTION" = "delete" ]; then
             git rm -f "$FILE_PATH"
             git commit -m "Claude: delete $FILE_PATH"
-            git push
+            git push 2>&1
           fi
 
       - name: Mark done in Supabase
