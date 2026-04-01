@@ -41,60 +41,32 @@ jobs:
             echo "TARGET_REPO=${{ github.event.client_payload.repo }}" >> $GITHUB_ENV
           fi
 
-      - name: Diagnose - Check PAT and target
+      - name: Clone and push to target repo
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          echo "=== DIAGNOSTICS ==="
-          echo "TARGET_REPO: $TARGET_REPO"
-          echo "FILE_PATH: $FILE_PATH"
-          echo "ACTION: $ACTION"
-          PAT="${{ secrets.GH_PAT }}"
-          echo "PAT length: ${#PAT}"
-          echo "PAT starts with: ${PAT:0:4}"
-          echo "=== Testing GitHub API auth ==="
-          RESPONSE=$(curl -s -o /tmp/gh_response.txt -w "%{http_code}" \
-            -H "Authorization: Bearer $PAT" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/user)
-          echo "Auth check HTTP status: $RESPONSE"
-          cat /tmp/gh_response.txt
-          echo ""
-          echo "=== Testing repo access ==="
-          REPO_RESPONSE=$(curl -s -o /tmp/repo_response.txt -w "%{http_code}" \
-            -H "Authorization: Bearer $PAT" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/ASTRUX5/$TARGET_REPO)
-          echo "Repo check HTTP status: $REPO_RESPONSE"
-          cat /tmp/repo_response.txt
-
-      - name: Clone target repo
-        run: |
-          PAT="${{ secrets.GH_PAT }}"
-          echo "Cloning https://x-access-token:[PAT]@github.com/ASTRUX5/$TARGET_REPO.git"
-          git clone https://x-access-token:$PAT@github.com/ASTRUX5/$TARGET_REPO.git target_repo
-          echo "Clone exit code: $?"
-
-      - name: Process sync action
-        run: |
+          git clone https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git target_repo
           cd target_repo
           git config user.email "claude-bot@github.com"
           git config user.name "Claude Bot"
+          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/ASTRUX5/${TARGET_REPO}.git
 
           if [ "$ACTION" = "upsert" ]; then
             mkdir -p "$(dirname "$FILE_PATH")"
             printf '%s' "$CONTENT" > "$FILE_PATH"
             git add "$FILE_PATH"
             git diff --cached --quiet || git commit -m "Claude: upsert $FILE_PATH"
-            echo "=== Pushing to origin ==="
-            git push 2>&1
-            echo "Push exit code: $?"
+            git push origin main
           elif [ "$ACTION" = "delete" ]; then
             git rm -f "$FILE_PATH"
             git commit -m "Claude: delete $FILE_PATH"
-            git push 2>&1
+            git push origin main
           fi
 
       - name: Mark done in Supabase
         if: env.RECORD_ID != ''
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/github_sync?id=eq.$RECORD_ID" \
             -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
